@@ -531,6 +531,257 @@ static void * add_dylib(struct macho *mo, char *name)
     return lc;
 }
 
+static int tcc_path_exists(const char *path)
+{
+    return path && *path && access(path, R_OK) == 0;
+}
+
+static char *tcc_dup_path_segment(const char *start, size_t len)
+{
+    char *buf;
+
+    if (!len)
+        return NULL;
+
+    if (start[0] == '~' && (len == 1 || start[1] == '/')) {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            size_t home_len = strlen(home);
+            size_t tail_len = len - 1;
+            buf = tcc_malloc(home_len + tail_len + 1);
+            memcpy(buf, home, home_len);
+            if (tail_len)
+                memcpy(buf + home_len, start + 1, tail_len);
+            buf[home_len + tail_len] = '\0';
+            return buf;
+        }
+    }
+
+    buf = tcc_malloc(len + 1);
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+    return buf;
+}
+
+static char *tcc_search_framework_in_dir(const char *dir, const char *name)
+{
+    static const char * const version_suffixes[] = {
+        "",
+        "/Versions/Current",
+        "/Versions/A",
+        NULL
+    };
+    static const char * const file_suffixes[] = {
+        "",
+        ".tbd",
+        NULL
+    };
+    const size_t framework_len = sizeof(".framework") - 1;
+    size_t dir_len, name_len;
+    int i, j;
+
+    if (!dir || !*dir)
+        return NULL;
+
+    dir_len = strlen(dir);
+    name_len = strlen(name);
+    for (i = 0; version_suffixes[i]; ++i) {
+        size_t version_len = strlen(version_suffixes[i]);
+        for (j = 0; file_suffixes[j]; ++j) {
+            size_t file_len = strlen(file_suffixes[j]);
+            size_t total_len = dir_len + 1 + name_len + framework_len +
+                version_len + 1 + name_len + file_len + 1;
+            char *path = tcc_malloc(total_len);
+            snprintf(path, total_len, "%s/%s.framework%s/%s%s",
+                     dir, name, version_suffixes[i], name, file_suffixes[j]);
+            if (tcc_path_exists(path))
+                return path;
+            tcc_free(path);
+        }
+    }
+    return NULL;
+}
+
+static char *tcc_search_framework_path_list(const char *paths, const char *name)
+{
+    const char sep = PATHSEP[0] ? PATHSEP[0] : ':';
+    const char *p, *end;
+
+    if (!paths || !*paths)
+        return NULL;
+
+    for (p = paths; *p;) {
+        end = strchr(p, sep);
+        if (!end)
+            end = strchr(p, '\0');
+        if (end > p) {
+            char *dir = tcc_dup_path_segment(p, (size_t)(end - p));
+            char *path = tcc_search_framework_in_dir(dir, name);
+            tcc_free(dir);
+            if (path)
+                return path;
+        }
+        if (!*end)
+            break;
+        p = end + 1;
+    }
+    return NULL;
+}
+
+static char *tcc_search_framework_in_sdk(const char *sdkroot, const char *name)
+{
+    static const char * const suffixes[] = {
+        "/System/Library/Frameworks",
+        "/Library/Frameworks",
+        NULL
+    };
+    int i;
+
+    if (!sdkroot || !*sdkroot)
+        return NULL;
+
+    for (i = 0; suffixes[i]; ++i) {
+        size_t len = strlen(sdkroot) + strlen(suffixes[i]) + 1;
+        char *dir = tcc_malloc(len);
+        char *path;
+
+        snprintf(dir, len, "%s%s", sdkroot, suffixes[i]);
+        path = tcc_search_framework_in_dir(dir, name);
+        tcc_free(dir);
+        if (path)
+            return path;
+    }
+    return NULL;
+}
+
+static char *tcc_sdkroot_from_usr_include(void)
+{
+    static int initialized;
+    static char *cached;
+
+    if (!initialized) {
+        const char needle[] = "/usr/include";
+        const char *pos;
+
+        initialized = 1;
+        if (CONFIG_USR_INCLUDE[0]) {
+            pos = strstr(CONFIG_USR_INCLUDE, needle);
+            if (pos) {
+                size_t prefix_len = (size_t)(pos - CONFIG_USR_INCLUDE);
+                if (prefix_len)
+                    cached = tcc_dup_path_segment(CONFIG_USR_INCLUDE, prefix_len);
+            }
+        }
+    }
+    return cached;
+}
+
+static char *tcc_sdkroot_from_library_path(const char *path)
+{
+    const char *sdk = strstr(path, ".sdk/");
+
+    if (sdk) {
+        size_t len = (sdk - path) + 4; /* include '.sdk' */
+        return tcc_dup_path_segment(path, len);
+    }
+
+    if ((sdk = strstr(path, ".sdk")) != NULL) {
+        size_t len = sdk - path + 4;
+        if (!path[len])
+            return tcc_dup_path_segment(path, len);
+    }
+    return NULL;
+}
+
+static char *tcc_search_framework_in_library_paths(TCCState *s, const char *name)
+{
+    int i;
+
+    if (!s)
+        return NULL;
+
+    for (i = 0; i < s->nb_library_paths; ++i) {
+        const char *lib = s->library_paths[i];
+        char *sdkroot, *path;
+
+        if (!lib)
+            continue;
+        sdkroot = tcc_sdkroot_from_library_path(lib);
+        if (!sdkroot)
+            continue;
+        path = tcc_search_framework_in_sdk(sdkroot, name);
+        tcc_free(sdkroot);
+        if (path)
+            return path;
+    }
+    return NULL;
+}
+
+ST_FUNC char *tcc_get_framework_dylib_path(TCCState *s, const char *framework_name)
+{
+    static const char default_fallback[] =
+        "~/Library/Frameworks:/Library/Frameworks:/Network/Library/Frameworks:/System/Library/Frameworks";
+    char *trimmed = NULL;
+    char *path = NULL;
+    const char *name = framework_name;
+    const char *suffix = ".framework";
+    size_t len;
+
+    if (!framework_name || !*framework_name)
+        return NULL;
+
+    if (strchr(framework_name, '/'))
+        return tcc_path_exists(framework_name) ? tcc_strdup(framework_name) : NULL;
+
+    len = strlen(framework_name);
+    if (len > strlen(suffix) &&
+        0 == strcmp(framework_name + len - strlen(suffix), suffix)) {
+        size_t base_len = len - strlen(suffix);
+        trimmed = tcc_malloc(base_len + 1);
+        memcpy(trimmed, framework_name, base_len);
+        trimmed[base_len] = '\0';
+        name = trimmed;
+    }
+
+    path = tcc_search_framework_path_list(getenv("DYLD_FRAMEWORK_PATH"), name);
+    if (!path)
+        path = tcc_search_framework_path_list(getenv("DYLD_FALLBACK_FRAMEWORK_PATH"), name);
+    if (!path)
+        path = tcc_search_framework_in_sdk(getenv("SDKROOT"), name);
+    if (!path && CONFIG_SYSROOT[0])
+        path = tcc_search_framework_in_sdk(CONFIG_SYSROOT, name);
+    if (!path)
+        path = tcc_search_framework_in_sdk(tcc_sdkroot_from_usr_include(), name);
+    if (!path)
+        path = tcc_search_framework_in_library_paths(s, name);
+    if (!path)
+        path = tcc_search_framework_path_list(default_fallback, name);
+
+    tcc_free(trimmed);
+    return path;
+}
+
+static char *tcc_framework_install_name_from_tbd(const char *path)
+{
+    char *soname = NULL;
+    size_t len;
+    int fd;
+
+    if (!path)
+        return NULL;
+
+    len = strlen(path);
+    if (len < 4 || strcmp(path + len - 4, ".tbd"))
+        return NULL;
+
+    fd = open(path, O_RDONLY | O_BINARY);
+    if (fd >= 0) {
+        soname = macho_tbd_soname(fd);
+        close(fd);
+    }
+    return soname;
+}
+
 static int uleb128_size (unsigned long long value)
 {
     int size =  0;
@@ -1773,6 +2024,17 @@ static void collect_sections(TCCState *s1, struct macho *mo, const char *filenam
           add_dylib(mo, dllref->name);
     }
 
+    for (i = 0; i < s1->nb_frameworks; ++i) {
+        char *path = tcc_get_framework_dylib_path(s1, s1->frameworks[i]);
+        char *install_name;
+        if (!path)
+            continue;
+        install_name = tcc_framework_install_name_from_tbd(path);
+        add_dylib(mo, install_name ? install_name : path);
+        tcc_free(install_name);
+        tcc_free(path);
+    }
+
     if (s1->rpath) {
 	char *path = s1->rpath, *end;
 	do {
@@ -2289,6 +2551,7 @@ ST_FUNC void tcc_add_macos_sdkpath(TCCState* s)
             );
     cstr_free(&path);
 }
+#endif
 
 ST_FUNC char* macho_tbd_soname(int fd) {
     char *soname, *data, *pos;
@@ -2305,7 +2568,6 @@ the_end:
     tcc_free(data);
     return ret;
 }
-#endif /* TCC_IS_NATIVE */
 
 ST_FUNC int macho_load_tbd(TCCState* s1, int fd, const char* filename, int lev)
 {
