@@ -882,6 +882,10 @@ struct TCCState {
     int *pack_stack_ptr;
     char **pragma_libs;
     int nb_pragma_libs;
+#if defined TCC_TARGET_MACHO
+    char **frameworks;
+    int nb_frameworks;
+#endif
 
     /* inline functions are stored as token lists and compiled last
        only if referenced */
@@ -1017,7 +1021,7 @@ struct TCCState {
 };
 
 struct filespec {
-    char type;
+    unsigned short type;
     char name[1];
 };
 
@@ -1277,6 +1281,7 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #define AFF_REFERENCED_DLL  0x20 /* load a referenced dll from another dll */
 #define AFF_TYPE_BIN        0x40 /* file to add is binary */
 #define AFF_WHOLE_ARCHIVE   0x80 /* load all objects from archive */
+#define AFF_TYPE_FRAMEWORK  0x100 /* entry represents a macOS framework */
 /* s->filetype: */
 #define AFF_TYPE_NONE   0
 #define AFF_TYPE_C      1
@@ -1307,6 +1312,10 @@ ST_FUNC void tcc_add_btstub(TCCState *s1);
 #endif
 ST_FUNC void tcc_add_pragma_libs(TCCState *s1);
 PUB_FUNC int tcc_add_library_err(TCCState *s, const char *f);
+PUB_FUNC int tcc_add_framework(TCCState *s, const char *framework);
+#if defined TCC_TARGET_MACHO
+ST_FUNC char *tcc_get_framework_dylib_path(TCCState *s, const char *framework_name);
+#endif
 PUB_FUNC void tcc_print_stats(TCCState *s, unsigned total_time);
 PUB_FUNC int tcc_parse_args(TCCState *s, int *argc, char ***argv);
 #ifdef _WIN32
@@ -1778,9 +1787,9 @@ PUB_FUNC int tcc_get_dllexports(const char *filename, char **pp);
 ST_FUNC int macho_output_file(TCCState * s1, const char *filename);
 ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev);
 ST_FUNC int macho_load_tbd(TCCState *s1, int fd, const char *filename, int lev);
+ST_FUNC char* macho_tbd_soname(int fd);
 #ifdef TCC_IS_NATIVE
 ST_FUNC void tcc_add_macos_sdkpath(TCCState* s);
-ST_FUNC char* macho_tbd_soname(int fd);
 #endif
 #endif
 /* ------------ tccrun.c ----------------- */
