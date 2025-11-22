@@ -77,6 +77,9 @@ LIBTCCAPI int tcc_add_library_path(TCCState *s, const char *pathname);
 /* the library name is the same as the argument of the '-l' option */
 LIBTCCAPI int tcc_add_library(TCCState *s, const char *libraryname);
 
+/* equivalent to -framework option (macOS only) */
+LIBTCCAPI int tcc_add_framework(TCCState *s, const char *framework_name);
+
 /* add a symbol to the compiled program */
 LIBTCCAPI int tcc_add_symbol(TCCState *s, const char *name, const void *val);
 
