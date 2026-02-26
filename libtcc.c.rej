@@ -1,0 +1,82 @@
+@@ -935,6 +935,9 @@
+     dynarray_reset(&s1->files, &s1->nb_files);
+     dynarray_reset(&s1->target_deps, &s1->nb_target_deps);
+     dynarray_reset(&s1->pragma_libs, &s1->nb_pragma_libs);
++#if defined TCC_TARGET_MACHO
++    dynarray_reset(&s1->frameworks, &s1->nb_frameworks);
++#endif
+     dynarray_reset(&s1->argv, &s1->argc);
+     dynarray_reset(&s1->link_argv, &s1->link_argc);
+     cstr_free(&s1->cmdline_defs);
+@@ -1320,6 +1323,38 @@
+     return tcc_add_dll(s, libraryname, flags | AFF_PRINT_ERROR);
+ }
+ 
++LIBTCCAPI int tcc_add_framework(TCCState *s, const char *framework_name)
++{
++    TCCState *s1 = s;
++#ifndef TCC_TARGET_MACHO
++    (void)framework_name;
++    return tcc_error_noabort("framework linking is only supported for Mach-O targets");
++#else
++    int i, ret;
++    char *path;
++
++    if (!framework_name || !*framework_name)
++        return tcc_error_noabort("missing framework name");
++
++    path = tcc_get_framework_dylib_path(s1, framework_name);
++    if (!path)
++        return tcc_error_noabort("framework '%s' not found", framework_name);
++
++    ret = tcc_add_file_internal(s1, path,
++            AFF_TYPE_LIB | AFF_REFERENCED_DLL | AFF_PRINT_ERROR);
++    tcc_free(path);
++    if (ret)
++        return ret;
++
++    for (i = 0; i < s1->nb_frameworks; ++i)
++        if (!strcmp(s1->frameworks[i], framework_name))
++            return 0;
++
++    dynarray_add(&s1->frameworks, &s1->nb_frameworks, tcc_strdup(framework_name));
++    return 0;
++#endif
++}
++
+ /* handle #pragma comment(lib,) */
+ ST_FUNC void tcc_add_pragma_libs(TCCState *s1)
+ {
+@@ -1517,6 +1552,9 @@
+     TCC_OPTION_L,
+     TCC_OPTION_B,
+     TCC_OPTION_l,
++#ifdef TCC_TARGET_MACHO
++    TCC_OPTION_framework,
++#endif
+     TCC_OPTION_bench,
+     TCC_OPTION_bt,
+     TCC_OPTION_b,
+@@ -1610,6 +1648,9 @@
+     { "L", TCC_OPTION_L, TCC_OPTION_HAS_ARG },
+     { "B", TCC_OPTION_B, TCC_OPTION_HAS_ARG },
+     { "l", TCC_OPTION_l, TCC_OPTION_HAS_ARG },
++#ifdef TCC_TARGET_MACHO
++    { "framework", TCC_OPTION_framework, TCC_OPTION_HAS_ARG },
++#endif
+     { "bench", TCC_OPTION_bench, 0 },
+ #ifdef CONFIG_TCC_BACKTRACE
+     { "bt", TCC_OPTION_bt, TCC_OPTION_HAS_ARG | TCC_OPTION_NOSEP },
+@@ -1938,6 +1979,12 @@
+         case TCC_OPTION_l:
+             args_parser_add_file(s, optarg, AFF_TYPE_LIB | (s->filetype & ~AFF_TYPE_MASK));
+             break;
++#ifdef TCC_TARGET_MACHO
++        case TCC_OPTION_framework:
++            args_parser_add_file(s, optarg,
++                AFF_TYPE_LIB | AFF_TYPE_FRAMEWORK | (s->filetype & ~AFF_TYPE_MASK));
++            break;
++#endif
+         case TCC_OPTION_pthread:
+             s->option_pthread = 1;
+             break;
