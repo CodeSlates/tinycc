@@ -3048,10 +3048,18 @@ typedef struct SectionMergeInfo {
 
 ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) * h) {
   int size = full_read(fd, h, sizeof *h);
-  if (size >= 4) {
+  if (size >= 16) {
     uint32_t magic = *(uint32_t *)h;
     if (magic == 0xfeedfacf || magic == 0xcffaedfe || magic == 0xfeedface ||
         magic == 0xcefaedfe) {
+      uint32_t filetype = ((uint32_t *)h)[3];
+      int swap = (magic == 0xcffaedfe || magic == 0xcefaedfe);
+      if (swap) {
+        filetype = ((filetype >> 24) & 0xff) | ((filetype >> 8) & 0xff00) |
+                   ((filetype & 0xff00) << 8) | ((filetype & 0xff) << 24);
+      }
+      if (filetype == 0x6) /* MH_DYLIB */
+        return AFF_BINTYPE_DYN;
       return AFF_BINTYPE_REL;
     }
   }
