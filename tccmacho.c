@@ -2672,7 +2672,8 @@ static const char *macho_sect_to_tcc_name(const char *segname,
   if (!strcmp(sectname, "__bss") || !strcmp(sectname, "__common"))
     return ".bss";
   if (!strcmp(sectname, "__cstring") || !strcmp(sectname, "__const") ||
-      !strcmp(sectname, "__rodata"))
+      !strcmp(sectname, "__rodata") || !strcmp(sectname, "__literal4") ||
+      !strcmp(sectname, "__literal8") || !strcmp(sectname, "__literal16"))
     return ".rodata";
   if (!strcmp(sectname, "__eh_frame"))
     return ".eh_frame";
@@ -3070,7 +3071,7 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
                 elf_type = R_AARCH64_ADR_PREL_PG_HI21;
               else if (r_type == ARM64_RELOC_PAGEOFF12) {
                 uint32_t insn = *(uint32_t *)(tcc_sec->data + base_off + addr);
-                if ((insn & 0x3b000000) == 0x39000000) {
+                if ((insn & 0x3f000000) == 0x39000000) {
                   /* Load/store register (unsigned immediate) */
                   int size = insn >> 30;
                   if (implicit_addend_valid)
@@ -3083,25 +3084,25 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
                     elf_type = R_AARCH64_LDST32_ABS_LO12_NC;
                   else if (size == 3)
                     elf_type = R_AARCH64_LDST64_ABS_LO12_NC;
-                } else if ((insn & 0x3b000000) == 0x3d000000) {
+                } else if ((insn & 0x3f000000) == 0x3d000000) {
                   /* Load/store register (FP/SIMD unsigned immediate) */
                   int size = insn >> 30;
                   int opc = (insn >> 22) & 3;
                   int shift = size;
-                  if (size == 3 && opc == 1)
+                  if (size == 0 && (opc == 2 || opc == 3))
                     shift = 4;
                   if (implicit_addend_valid)
                     addend = ((insn >> 10) & 0xfff) << shift;
-                  if (size == 0)
+                  if (shift == 0)
                     elf_type = R_AARCH64_LDST8_ABS_LO12_NC;
-                  else if (size == 1)
+                  else if (shift == 1)
                     elf_type = R_AARCH64_LDST16_ABS_LO12_NC;
-                  else if (size == 2)
+                  else if (shift == 2)
                     elf_type = R_AARCH64_LDST32_ABS_LO12_NC;
-                  else if (size == 3 && opc == 1)
-                    elf_type = R_AARCH64_LDST128_ABS_LO12_NC;
-                  else if (size == 3)
+                  else if (shift == 3)
                     elf_type = R_AARCH64_LDST64_ABS_LO12_NC;
+                  else if (shift == 4)
+                    elf_type = R_AARCH64_LDST128_ABS_LO12_NC;
                 } else {
                   /* Add/sub */
                   int shift = (insn >> 22) & 3;
