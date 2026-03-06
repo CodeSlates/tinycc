@@ -232,6 +232,9 @@ struct dyld_chained_ptr_64_bind {
 };
 
 #define S_REGULAR 0x0
+#define S_CSTRING_LITERALS 0x2
+#define S_LITERAL_POINTERS 0x5
+#define S_ATTR_NO_DEAD_STRIP 0x10000000
 #define S_ZEROFILL 0x1
 #define S_NON_LAZY_SYMBOL_POINTERS 0x6
 #define S_LAZY_SYMBOL_POINTERS 0x7
@@ -398,6 +401,9 @@ enum skind {
   sk_text,
   sk_stubs,
   sk_stub_helper,
+  sk_objc_methname,
+  sk_objc_classname,
+  sk_objc_methtype,
   sk_ro_data,
   sk_uw_info,
   sk_nl_ptr, // non-lazy pointers, aka GOT
@@ -415,6 +421,15 @@ enum skind {
   sk_rw_data,
   sk_thread_data,
   sk_thread_vars,
+  sk_objc_classrefs,
+  sk_objc_selrefs,
+  sk_objc_data,
+  sk_objc_const,
+  sk_objc_protolist,
+  sk_objc_superrefs,
+  sk_objc_cfstring,
+  sk_objc_classlist,
+  sk_objc_imageinfo,
   sk_bss,
   sk_thread_bss,
   sk_linkedit,
@@ -1471,6 +1486,9 @@ const struct {
     /*[sk_stub_helper] =*/
     {1, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
      "__stub_helper"},
+    /*[sk_objc_methname] =*/{1, S_CSTRING_LITERALS, "__objc_methname"},
+    /*[sk_objc_classname] =*/{1, S_CSTRING_LITERALS, "__objc_classname"},
+    /*[sk_objc_methtype] =*/{1, S_CSTRING_LITERALS, "__objc_methtype"},
     /*[sk_ro_data] =*/{2, S_REGULAR, "__rodata"},
     /*[sk_uw_info] =*/{0},
     /*[sk_nl_ptr] =*/{2, S_NON_LAZY_SYMBOL_POINTERS, "__got"},
@@ -1488,6 +1506,20 @@ const struct {
     /*[sk_rw_data] =*/{4, S_REGULAR, "__data"},
     /*[sk_thread_data] =*/{4, S_THREAD_LOCAL_REGULAR, "__thread_data"},
     /*[sk_thread_vars] =*/{4, S_THREAD_LOCAL_VARIABLES, "__thread_vars"},
+    /*[sk_objc_classrefs] =*/
+    {4, S_REGULAR | S_ATTR_NO_DEAD_STRIP, "__objc_classrefs"},
+    /*[sk_objc_selrefs] =*/
+    {4, S_LITERAL_POINTERS | S_ATTR_NO_DEAD_STRIP, "__objc_selrefs"},
+    /*[sk_objc_data] =*/{4, S_REGULAR, "__objc_data"},
+    /*[sk_objc_const] =*/{4, S_REGULAR, "__objc_const"},
+    /*[sk_objc_protolist] =*/{4, S_REGULAR, "__objc_protolist"},
+    /*[sk_objc_superrefs] =*/
+    {4, S_REGULAR | S_ATTR_NO_DEAD_STRIP, "__objc_superrefs"},
+    /*[sk_objc_cfstring] =*/{4, S_REGULAR, "__cfstring"},
+    /*[sk_objc_classlist] =*/
+    {4, S_REGULAR | S_ATTR_NO_DEAD_STRIP, "__objc_classlist"},
+    /*[sk_objc_imageinfo] =*/
+    {4, S_REGULAR | S_ATTR_NO_DEAD_STRIP, "__objc_imageinfo"},
     /*[sk_bss] =*/{4, S_ZEROFILL, "__bss"},
     /*[sk_thread_bss] =*/{4, S_THREAD_LOCAL_ZEROFILL, "__thread_bss"},
     /*[sk_linkedit] =*/{5, S_REGULAR, NULL},
@@ -1945,6 +1977,42 @@ static void collect_sections(TCCState *s1, struct macho *mo,
             sk = sk_debug_str;
           else if (s == dwarf_line_str_section)
             sk = sk_debug_line_str;
+          else if (strncmp(s->name, "__objc_methname", 15) == 0 ||
+                   strncmp(s->name, ".objc_methname", 14) == 0)
+            sk = sk_objc_methname;
+          else if (strncmp(s->name, "__objc_classname", 16) == 0 ||
+                   strncmp(s->name, ".objc_classname", 15) == 0)
+            sk = sk_objc_classname;
+          else if (strncmp(s->name, "__objc_methtype", 15) == 0 ||
+                   strncmp(s->name, ".objc_methtype", 14) == 0)
+            sk = sk_objc_methtype;
+          else if (strncmp(s->name, "__objc_classrefs", 16) == 0 ||
+                   strncmp(s->name, ".objc_classrefs", 15) == 0)
+            sk = sk_objc_classrefs;
+          else if (strncmp(s->name, "__objc_selrefs", 14) == 0 ||
+                   strncmp(s->name, ".objc_selrefs", 13) == 0)
+            sk = sk_objc_selrefs;
+          else if (strncmp(s->name, "__objc_data", 11) == 0 ||
+                   strncmp(s->name, ".objc_data", 10) == 0)
+            sk = sk_objc_data;
+          else if (strncmp(s->name, "__objc_const", 12) == 0 ||
+                   strncmp(s->name, ".objc_const", 11) == 0)
+            sk = sk_objc_const;
+          else if (strncmp(s->name, "__objc_protolist", 16) == 0 ||
+                   strncmp(s->name, ".objc_protolist", 15) == 0)
+            sk = sk_objc_protolist;
+          else if (strncmp(s->name, "__objc_superrefs", 16) == 0 ||
+                   strncmp(s->name, ".objc_superrefs", 15) == 0)
+            sk = sk_objc_superrefs;
+          else if (strncmp(s->name, "__cfstring", 10) == 0 ||
+                   strncmp(s->name, ".cfstring", 9) == 0)
+            sk = sk_objc_cfstring;
+          else if (strncmp(s->name, "__objc_classlist", 16) == 0 ||
+                   strncmp(s->name, ".objc_classlist", 15) == 0)
+            sk = sk_objc_classlist;
+          else if (strncmp(s->name, "__objc_imageinfo", 16) == 0 ||
+                   strncmp(s->name, ".objc_imageinfo", 15) == 0)
+            sk = sk_objc_imageinfo;
           else if (flags & SHF_EXECINSTR)
             sk = sk_text;
           else if (flags & SHF_WRITE)
@@ -1955,6 +2023,11 @@ static void collect_sections(TCCState *s1, struct macho *mo,
         }
     } else
       sk = sk_discard;
+
+    if (strstr(s->name, "__objc") || strstr(s->name, "bss"))
+      printf("TCC SECT TRACE: %s flags=%x size=%llu sk=%d sh_type=%d\n",
+             s->name, flags, (unsigned long long)s->data_offset, sk, type);
+
     s->prev = mo->sk_to_sect[sk].s;
     mo->sk_to_sect[sk].s = s;
     used_segment[skinfo[sk].seg_initial] = 1;
@@ -2565,14 +2638,19 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename) {
 
     /* NOBITS (e.g. .bss) with any size must be materialized so we can
        apply relocations (if any) and emit content; do this before
-       collect_sections so layout reserves file space. */
+       collect_sections so layout reserves file space.
+       HOWEVER, on Mach-O, we MUST NOT convert SHT_NOBITS for .bss to
+       SHT_PROGBITS! Doing so merges .bss into .data, throwing off section
+       alignments! Mach-O explicitly handles S_ZEROFILL so we retain SHT_NOBITS.
+       We only reallocate memory to physically receive the relocation patches.
+     */
     for (i = 1; i < s1->nb_sections; i++) {
       Section *s = s1->sections[i];
       if (s->sh_type == SHT_NOBITS && s->data_offset > 0 &&
           !(s->sh_flags & SHF_TLS)) {
         section_realloc(s, s->data_offset);
         memset(s->data, 0, s->data_offset);
-        s->sh_type = SHT_PROGBITS;
+        /* DO NOT MUTATE THE SECTION TYPE: s->sh_type = SHT_PROGBITS; */
       }
     }
 
@@ -3067,9 +3145,18 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
                 else
                   elf_type = R_AARCH64_JUMP26;
                 addend = 0;
-              } else if (r_type == ARM64_RELOC_PAGE21)
+              } else if (r_type == ARM64_RELOC_PAGE21) {
                 elf_type = R_AARCH64_ADR_PREL_PG_HI21;
-              else if (r_type == ARM64_RELOC_PAGEOFF12) {
+                if (implicit_addend_valid && !MACHO_R_EXTERN(rel[k])) {
+                  uint32_t insn =
+                      *(uint32_t *)(tcc_sec->data + base_off + addr);
+                  int32_t immlo = (insn >> 29) & 3;
+                  int32_t immhi = (insn >> 5) & 0x7ffff;
+                  int32_t imm = (immhi << 2) | immlo;
+                  imm = (imm << 11) >> 11; /* Sign extend 21 bits */
+                  addend = (imm + (addr >> 12)) << 12;
+                }
+              } else if (r_type == ARM64_RELOC_PAGEOFF12) {
                 uint32_t insn = *(uint32_t *)(tcc_sec->data + base_off + addr);
                 if ((insn & 0x3f000000) == 0x39000000) {
                   /* Load/store register (unsigned immediate) */
@@ -3211,38 +3298,203 @@ ST_FUNC int macho_load_tbd(TCCState *s1, int fd, const char *filename,
   int ret = -1;
 
   pos = data = tcc_load_text(fd);
-  if (!tbd_parse_movepast("install-name: "))
+  if (!tbd_parse_movepast("install-name: ")) {
     goto the_end;
+  }
   tbd_parse_skipws;
   tbd_parse_tramplequote;
   soname = pos;
   if (!tbd_parse_movetoany("\n \"'"))
     goto the_end;
+
+  /* Look for reexported-libraries: first to recursively load them.
+     We do this BEFORE tbd_parse_trample inserts a \0 that truncates `data`! */
+  char *rexp_start = strstr(pos, "reexported-libraries:");
+  if (rexp_start) {
+    /* Offset by 21 to avoid matching the header string itself */
+    char *lib_block = strstr(rexp_start + 21, "libraries:");
+    if (lib_block) {
+      char *lpos = strchr(lib_block, '[');
+      if (lpos) {
+        lpos++; /* Point right after '[' */
+        int lcont = 1;
+        while (lcont) {
+          char *libname;
+          while (*lpos && (*lpos == ' ' || *lpos == '\t' || *lpos == '\n' ||
+                           *lpos == '\r' || *lpos == '\'' || *lpos == '"'))
+            lpos++;
+          if (*lpos == 0 || *lpos == ']')
+            break;
+          libname = lpos;
+          while (*lpos && *lpos != ',' && *lpos != ']' && *lpos != '\'' &&
+                 *lpos != '"' && *lpos != '\n')
+            lpos++;
+          char term = *lpos;
+          *lpos = 0;
+
+          if (strlen(libname) > 0) {
+            /* Load the re-exported library */
+            char full_lib_path[1024];
+            snprintf(full_lib_path, sizeof(full_lib_path), "%s", libname);
+
+            /* On macOS SDKs, `.tbd` extension is implicitly required for text
+             * stubs */
+            char ext_libname[1024];
+            snprintf(ext_libname, sizeof(ext_libname), "%s", libname);
+            int ext_len = strlen(ext_libname);
+            if (ext_len > 6 &&
+                strcmp(ext_libname + ext_len - 6, ".dylib") == 0) {
+              strcpy(ext_libname + ext_len - 6, ".tbd");
+            } else {
+              strncat(ext_libname, ".tbd",
+                      sizeof(ext_libname) - strlen(ext_libname) - 1);
+            }
+
+            int subfd = open(full_lib_path, O_RDONLY | O_BINARY);
+            if (subfd < 0) {
+              snprintf(full_lib_path, sizeof(full_lib_path), "%s", ext_libname);
+              subfd = open(full_lib_path, O_RDONLY | O_BINARY);
+            }
+            /* SDK path prefix mapping if absolute */
+            if (subfd < 0 && libname[0] == '/') {
+              char sdk_path[1024];
+              snprintf(sdk_path, sizeof(sdk_path),
+                       "/Applications/Xcode.app/Contents/Developer/Platforms/"
+                       "MacOSX.platform/Developer/SDKs/MacOSX.sdk%s",
+                       ext_libname);
+              subfd = open(sdk_path, O_RDONLY | O_BINARY);
+              if (subfd >= 0) {
+                snprintf(full_lib_path, sizeof(full_lib_path), "%s", sdk_path);
+              }
+            }
+
+            if (subfd >= 0) {
+              macho_load_tbd(s1, subfd, full_lib_path, lev + 1);
+              close(subfd);
+            }
+          }
+
+          *lpos = term;
+          if (*lpos == ']')
+            lcont = 0;
+          else if (*lpos)
+            lpos++;
+        }
+      }
+    }
+  }
+
+  /* NOW it is safe to trample the install-name \n for adding to dllref */
   tbd_parse_trample;
   ret = 0;
-  if (tcc_add_dllref(s1, soname, lev)->found)
+
+  if (tcc_add_dllref(s1, soname, lev)->found) {
     goto the_end;
+  }
+
   while (pos) {
     char *sym = NULL;
     int cont = 1;
-    if (!tbd_parse_movepast("symbols: "))
+    char *list_pos = pos;
+    char *prefix1 = "";
+    char *prefix2 = "";
+
+    char *sym_pos = strstr(list_pos, "symbols: ");
+    char *objc_class_pos = strstr(list_pos, "objc-classes: ");
+    char *objc_ivar_pos = strstr(list_pos, "objc-ivars: ");
+
+    pos = NULL;
+    if (sym_pos && (!pos || sym_pos < pos)) {
+      pos = sym_pos;
+      prefix1 = "";
+      prefix2 = "";
+    }
+    if (objc_class_pos && (!pos || objc_class_pos < pos)) {
+      pos = objc_class_pos;
+      prefix1 = "_OBJC_CLASS_$_";
+      prefix2 = "_OBJC_METACLASS_$_";
+    }
+    if (objc_ivar_pos && (!pos || objc_ivar_pos < pos)) {
+      pos = objc_ivar_pos;
+      prefix1 = "_OBJC_IVAR_$_";
+      prefix2 = "";
+    }
+
+    if (!pos) {
       break;
-    if (!tbd_parse_movepast("["))
-      break;
+    }
+
+    if (!tbd_parse_movepast("[")) {
+      continue;
+    }
+
     while (cont) {
-      tbd_parse_skipws;
-      tbd_parse_tramplequote;
-      sym = pos;
-      if (!tbd_parse_movetoany(",] \"'"))
-        break;
-      tbd_parse_tramplequote;
-      tbd_parse_tramplespace;
-      tbd_parse_skipws;
-      if (*pos == 0 || *pos == ']')
+      /* skip whitespace and opening quotes */
+      while (*pos &&
+             (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r' ||
+              *pos == '\'' || *pos == '"' || *pos == ','))
+        pos++;
+
+      if (*pos == 0 || *pos == ']') {
         cont = 0;
-      tbd_parse_trample;
-      set_elf_sym(s1->dynsymtab_section, 0, 0,
-                  ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF, sym);
+        break;
+      }
+
+      sym = pos;
+
+      /* advance to the end of the symbol (stop at quote, space, or
+       * comma/bracket) */
+      while (*pos && *pos != ' ' && *pos != '\t' && *pos != '\n' &&
+             *pos != '\r' && *pos != '\'' && *pos != '"' && *pos != ',' &&
+             *pos != ']') {
+        pos++;
+      }
+
+      char term = *pos;
+      *pos = 0; // terminate the symbol string
+
+      if (strlen(sym) > 0) {
+        char mangled1[1024];
+        snprintf(mangled1, sizeof(mangled1), "%s%s", prefix1, sym);
+        set_elf_sym(s1->dynsymtab_section, 0, 0,
+                    ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF,
+                    mangled1);
+        if (prefix2[0]) {
+          char mangled2[1024];
+          snprintf(mangled2, sizeof(mangled2), "%s%s", prefix2, sym);
+          set_elf_sym(s1->dynsymtab_section, 0, 0,
+                      ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF,
+                      mangled2);
+        }
+      } else {
+        /* Standard symbols. Prefix with _ if not present. */
+        if (sym[0] == '$' || sym[0] == '_' ||
+            strcmp(sym, "dyld_stub_binder") == 0) {
+          set_elf_sym(s1->dynsymtab_section, 0, 0,
+                      ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF, sym);
+        } else {
+          char mangled[1024];
+          snprintf(mangled, sizeof(mangled), "_%s", sym);
+          set_elf_sym(s1->dynsymtab_section, 0, 0,
+                      ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF,
+                      mangled);
+        }
+      }
+
+      *pos = term;
+      if (*pos == ']')
+        cont = 0;
+      else if (*pos)
+        pos++;
+    }
+
+    /* Advance 'pos' past the array block. Usually we trample the ']' turning
+       it to 0, but if we exit early or tbd_parse_trample changes it, we must
+       cleanly resume. pos is currently pointing to the buffer character after
+       the sym array termination. If cont == 0 occurs via *pos == 0 or ']',
+       pos+1 is the safest advancement! */
+    if (pos) {
+      pos++;
     }
   }
 
