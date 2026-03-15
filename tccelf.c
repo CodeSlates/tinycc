@@ -3633,6 +3633,13 @@ static int archive_symtab_entrysize(const char *name, int *little_endian,
   *little_endian = 0;
   *ranlib_format = 0;
 
+  if (!strcmp(name, "/"))
+    return 4;
+  if (!strcmp(name, "/SYM64/") || !strcmp(name, "/SYM64"))
+    return 8;
+  if (!strcmp(name, "//"))
+    return 0;
+
   if (len && name[len - 1] == '/')
     --len;
   if (len >= sizeof(trimmed))
@@ -3640,10 +3647,6 @@ static int archive_symtab_entrysize(const char *name, int *little_endian,
   memcpy(trimmed, name, len);
   trimmed[len] = '\0';
 
-  if (!strcmp(trimmed, "/"))
-    return 4;
-  if (!strcmp(trimmed, "/SYM64/"))
-    return 8;
   if (!strncmp(trimmed, "__.SYMDEF", 9)) {
     *little_endian = 1;
     *ranlib_format = 1;
