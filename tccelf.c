@@ -3421,8 +3421,29 @@ static unsigned long long get_arch_number(const uint8_t *b, int n,
   return ret;
 }
 
+static int ar_get_gnu_long_name(const char *long_names, size_t long_names_size,
+                                size_t offset, const char **name,
+                                size_t *name_len) {
+  const char *start, *end;
+  size_t len;
+
+  if (!long_names || offset >= long_names_size)
+    return 0;
+  start = long_names + offset;
+  end = memchr(start, '\n', long_names + long_names_size - start);
+  if (!end)
+    return 0;
+  len = end - start;
+  if (len && start[len - 1] == '/')
+    len--;
+  *name = start;
+  *name_len = len;
+  return 1;
+}
+
 static int read_ar_header(int fd, int offset, ArchiveHeader *hdr,
-                          char **long_name_out, int *name_len_out) {
+                          char **long_name_out, int *name_len_out,
+                          const char *long_names, size_t long_names_size) {
   char *p, *e;
   int len;
   lseek(fd, offset, SEEK_SET);
@@ -3462,13 +3483,40 @@ static int read_ar_header(int fd, int offset, ArchiveHeader *hdr,
       long_name_len = sizeof(hdr->ar_name) - 1;
     memcpy(hdr->ar_name, name_buf, long_name_len);
     hdr->ar_name[long_name_len] = '\0';
+  } else if (long_names && hdr->ar_name[0] == '/' &&
+             hdr->ar_name[1] >= '0' && hdr->ar_name[1] <= '9') {
+    char *endptr;
+    unsigned long long name_off = strtoull(hdr->ar_name + 1, &endptr, 10);
+    const char *gnu_name;
+    size_t gnu_len;
+    if (*endptr == '\0' &&
+        ar_get_gnu_long_name(long_names, long_names_size, (size_t)name_off,
+                             &gnu_name, &gnu_len)) {
+      if (long_name_out) {
+        char *name_buf = tcc_malloc(gnu_len + 1);
+        memcpy(name_buf, gnu_name, gnu_len);
+        name_buf[gnu_len] = '\0';
+        *long_name_out = name_buf;
+      }
+      if (name_len_out)
+        *name_len_out = 0;
+      {
+        size_t copy_len = gnu_len;
+        if (copy_len >= sizeof(hdr->ar_name))
+          copy_len = sizeof(hdr->ar_name) - 1;
+        memcpy(hdr->ar_name, gnu_name, copy_len);
+        hdr->ar_name[copy_len] = '\0';
+      }
+    }
   }
   return len;
 }
 
 /* load only the objects which resolve undefined symbols */
 static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize,
-                             int little_endian, int ranlib_format) {
+                             int little_endian, int ranlib_format,
+                             const char *long_names,
+                             size_t long_names_size) {
   int i, bound, nsyms, sym_index, len, ret = -1;
   unsigned long long off, names_size = 0;
   int pair_size = 0;
@@ -3531,7 +3579,8 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize,
           continue;
         off = get_arch_number(ar_index + (unsigned long long)i * entrysize,
                               entrysize, little_endian);
-        len = read_ar_header(fd, off, &hdr.hdr, &hdr.long_name, &hdr.name_len);
+        len = read_ar_header(fd, off, &hdr.hdr, &hdr.long_name, &hdr.name_len,
+                             long_names, long_names_size);
         if (len <= 0 || memcmp(hdr.hdr.ar_fmag, ARFMAG, 2))
           goto invalid;
         off += len;
@@ -3579,7 +3628,8 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize,
         if (sym->st_shndx != SHN_UNDEF)
           continue;
         off = get_arch_number(entry + pair_size, pair_size, little_endian);
-        len = read_ar_header(fd, off, &hdr.hdr, &hdr.long_name, &hdr.name_len);
+        len = read_ar_header(fd, off, &hdr.hdr, &hdr.long_name, &hdr.name_len,
+                             long_names, long_names_size);
         if (len <= 0 || memcmp(hdr.hdr.ar_fmag, ARFMAG, 2))
           goto invalid;
         off += len;
@@ -3664,6 +3714,9 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte) {
   int size, len;
   unsigned long file_offset;
   ElfW(Ehdr) ehdr;
+  char *long_names = NULL;
+  size_t long_names_size = 0;
+  int ret = 0;
 
 #ifdef TCC_TARGET_MACHO
   alacarte = 0;
@@ -3673,16 +3726,92 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte) {
   /* full_read(fd, magic, sizeof(magic)); */
   file_offset = sizeof ARMAG - 1;
 
+  if (alacarte) {
+    unsigned long symtab_offset = 0;
+    int symtab_size = 0;
+    int entrysize = 0;
+    int little_endian = 0;
+    int ranlib_format = 0;
+
+    for (;;) {
+      len = read_ar_header(fd, file_offset, &hdr.hdr, &hdr.long_name,
+                           &hdr.name_len, long_names, long_names_size);
+      if (len == 0)
+        break;
+      if (len < 0) {
+        if (s1->verbose == 2)
+          fprintf(stderr, "invalid archive: bad header at offset %u\n",
+                  (unsigned)file_offset);
+        ret = tcc_error_noabort("invalid archive");
+        goto the_end;
+      }
+      file_offset += len;
+      if (s1->verbose == 2)
+        printf("   [ar] member %s len=%d name_len=%d size=%d\n",
+               hdr.long_name ? hdr.long_name : hdr.hdr.ar_name, len,
+               hdr.name_len, (int)strtol(hdr.hdr.ar_size, NULL, 0));
+      size = strtol(hdr.hdr.ar_size, NULL, 0);
+      if (hdr.name_len) {
+        if (size < hdr.name_len) {
+          if (s1->verbose == 2)
+            fprintf(stderr,
+                    "invalid archive entry '%s': size %d < name %d\n",
+                    hdr.long_name ? hdr.long_name : hdr.hdr.ar_name, size,
+                    hdr.name_len);
+          ret = tcc_error_noabort("invalid archive");
+          goto the_end;
+        }
+        size -= hdr.name_len;
+      }
+      {
+        const char *mname = hdr.long_name ? hdr.long_name : hdr.hdr.ar_name;
+        if (!strcmp(mname, "//")) {
+          tcc_free(long_names);
+          long_names = tcc_malloc(size + 1);
+          if (full_read(fd, long_names, size) != size) {
+            ret = tcc_error_noabort("invalid archive");
+            goto the_end;
+          }
+          long_names[size] = '\0';
+          long_names_size = size;
+        }
+        if (!entrysize) {
+          entrysize =
+              archive_symtab_entrysize(mname, &little_endian, &ranlib_format);
+          if (entrysize) {
+            symtab_offset = file_offset;
+            symtab_size = size;
+          }
+        }
+      }
+      /* align to even */
+      file_offset = (file_offset + size + 1) & ~1;
+      tcc_free(hdr.long_name);
+      hdr.long_name = NULL;
+    }
+
+    if (entrysize) {
+      if (lseek(fd, symtab_offset, SEEK_SET) < 0) {
+        ret = -1;
+        goto the_end;
+      }
+      ret = tcc_load_alacarte(s1, fd, symtab_size, entrysize, little_endian,
+                              ranlib_format, long_names, long_names_size);
+    }
+    goto the_end;
+  }
+
   for (;;) {
     len = read_ar_header(fd, file_offset, &hdr.hdr, &hdr.long_name,
-                         &hdr.name_len);
+                         &hdr.name_len, long_names, long_names_size);
     if (len == 0)
-      return 0;
+      goto the_end;
     if (len < 0) {
       if (s1->verbose == 2)
         fprintf(stderr, "invalid archive: bad header at offset %u\n",
                 (unsigned)file_offset);
-      return tcc_error_noabort("invalid archive");
+      ret = tcc_error_noabort("invalid archive");
+      goto the_end;
     }
     file_offset += len;
     if (s1->verbose == 2)
@@ -3696,47 +3825,63 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte) {
           fprintf(stderr, "invalid archive entry '%s': size %d < name %d\n",
                   hdr.long_name ? hdr.long_name : hdr.hdr.ar_name, size,
                   hdr.name_len);
-        return tcc_error_noabort("invalid archive");
+        ret = tcc_error_noabort("invalid archive");
+        goto the_end;
       }
       size -= hdr.name_len;
     }
-    if (alacarte) {
-      int little_endian = 0, ranlib_format = 0;
+    {
       const char *mname = hdr.long_name ? hdr.long_name : hdr.hdr.ar_name;
-      int entrysize =
-          archive_symtab_entrysize(mname, &little_endian, &ranlib_format);
-      if (entrysize)
-        return tcc_load_alacarte(s1, fd, size, entrysize, little_endian,
-                                 ranlib_format);
-    } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
-      if (s1->verbose == 2)
-        printf("   -> %s\n", hdr.hdr.ar_name);
-#ifdef TCC_TARGET_MACHO
-      {
-        uint32_t magic;
-        int old_off = lseek(fd, 0, SEEK_CUR);
-        lseek(fd, file_offset, SEEK_SET);
-        full_read(fd, &magic, 4);
-        lseek(fd, old_off, SEEK_SET);
-        if (magic == 0xfeedfacf || magic == 0xcffaedfe || magic == 0xfeedface ||
-            magic == 0xcefaedfe) {
-          if (macho_load_object_file(s1, fd, file_offset) < 0)
-            return -1;
-        } else {
-          if (tcc_load_object_file(s1, fd, file_offset) < 0)
-            return -1;
+      if (!strcmp(mname, "//")) {
+        tcc_free(long_names);
+        long_names = tcc_malloc(size + 1);
+        if (full_read(fd, long_names, size) != size) {
+          ret = tcc_error_noabort("invalid archive");
+          goto the_end;
         }
-      }
+        long_names[size] = '\0';
+        long_names_size = size;
+      } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
+        if (s1->verbose == 2)
+          printf("   -> %s\n", hdr.hdr.ar_name);
+#ifdef TCC_TARGET_MACHO
+        {
+          uint32_t magic;
+          int old_off = lseek(fd, 0, SEEK_CUR);
+          lseek(fd, file_offset, SEEK_SET);
+          full_read(fd, &magic, 4);
+          lseek(fd, old_off, SEEK_SET);
+          if (magic == 0xfeedfacf || magic == 0xcffaedfe ||
+              magic == 0xfeedface || magic == 0xcefaedfe) {
+            if (macho_load_object_file(s1, fd, file_offset) < 0) {
+              ret = -1;
+              goto the_end;
+            }
+          } else {
+            if (tcc_load_object_file(s1, fd, file_offset) < 0) {
+              ret = -1;
+              goto the_end;
+            }
+          }
+        }
 #else
-      if (tcc_load_object_file(s1, fd, file_offset) < 0)
-        return -1;
+        if (tcc_load_object_file(s1, fd, file_offset) < 0) {
+          ret = -1;
+          goto the_end;
+        }
 #endif
+      }
     }
     /* align to even */
     file_offset = (file_offset + size + 1) & ~1;
     tcc_free(hdr.long_name);
     hdr.long_name = NULL;
   }
+
+the_end:
+  tcc_free(hdr.long_name);
+  tcc_free(long_names);
+  return ret;
 }
 
 #ifndef ELF_OBJ_ONLY
