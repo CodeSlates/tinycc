@@ -1,79 +1,106 @@
 #!/bin/bash
 set -e
 
+# Cross-compile TCC for ARM64 on an x86_64 host, then verify it can
+# link and produce working ARM64 binaries under QEMU emulation.
+
+ARM_SYS_PATH="/usr/aarch64-linux-gnu"
+BUILD_OUTPUT="$(pwd)/arm_build_output"
+
+# ---------------------------------------------------------------
 # 1. Host setup
-echo "Updating host tools..."
-sudo rm -f /etc/apt/sources.list.d/yarn.list
-sudo apt-get update
-sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu qemu-user-static make
+# ---------------------------------------------------------------
+echo "=== Installing host tools ==="
+sudo rm -f /etc/apt/sources.list.d/yarn.list 2>/dev/null || true
+sudo apt-get update -qq
+sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu qemu-user-static make
 
-# 2. Clean Workspace
-echo "Cleaning workspace..."
+# ---------------------------------------------------------------
+# 2. Clean workspace
+# ---------------------------------------------------------------
+echo "=== Cleaning workspace ==="
 make clean || true
-rm -f c2str.exe tccdefs_.h tcc_real.bin
+rm -f c2str.exe tccdefs_.h tcc_real.bin config.mak config.h
 
-# 3. Build host-native c2str
-echo "Building host-native c2str..."
+# ---------------------------------------------------------------
+# 3. Build host-native c2str helper
+# ---------------------------------------------------------------
+echo "=== Building host-native c2str ==="
 gcc -O2 -DC2STR conftest.c -o c2str.exe || gcc -O2 c2str.c -o c2str.exe
 ./c2str.exe include/tccdefs.h tccdefs_.h
 touch tccdefs_.h
 
-# 4. Configure for ARM64
-echo "Configuring for ARM64..."
-./configure --cross-prefix=aarch64-linux-gnu- --cpu=aarch64 --prefix=$(pwd)/arm_build_output
+# ---------------------------------------------------------------
+# 4. Configure for ARM64 cross-build
+# ---------------------------------------------------------------
+echo "=== Configuring for ARM64 ==="
+./configure \
+    --cross-prefix=aarch64-linux-gnu- \
+    --cpu=aarch64 \
+    --prefix="$BUILD_OUTPUT" \
+    --sysroot="" \
+    --crtprefix="$ARM_SYS_PATH/lib" \
+    --libpaths="{B}:$ARM_SYS_PATH/lib:/usr/lib/aarch64-linux-gnu" \
+    --sysincludepaths="{B}/include:$ARM_SYS_PATH/include:/usr/include" \
+    --elfinterp="/lib/ld-linux-aarch64.so.1"
 
-# 5. Build JUST the main compiler binary first
-echo "Building the base ARM compiler..."
+echo "--- config.mak ---"
+cat config.mak
+echo "------------------"
+
+# ---------------------------------------------------------------
+# 5. Build TCC compiler binary (ARM64 ELF, cross-compiled by
+#    aarch64-linux-gnu-gcc)
+# ---------------------------------------------------------------
+echo "=== Building ARM64 TCC binary ==="
 make tcc ONE_SOURCE=1
 
-# 6. THE BAIT-AND-SWITCH (Now with Header Injection!)
-echo "Swapping ARM binary with QEMU wrapper script..."
+# ---------------------------------------------------------------
+# 6. Create QEMU wrapper so that "make" can transparently invoke
+#    the ARM binary for building runtime libs and install targets
+# ---------------------------------------------------------------
+echo "=== Creating QEMU wrapper ==="
 mv tcc tcc_real.bin
 
-export ARM_SYS_PATH="/usr/aarch64-linux-gnu"
-cat > tcc << EOF
+cat > tcc <<'WRAPPER'
 #!/bin/sh
-# Route via QEMU AND force it to use the ARM cross-compiler headers
-exec qemu-aarch64-static -L "$ARM_SYS_PATH" "\$(dirname "\$0")/tcc_real.bin" -I"$ARM_SYS_PATH/include" "\$@"
-EOF
+exec qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+    "$(dirname "$0")/tcc_real.bin" "$@"
+WRAPPER
 chmod +x tcc
 
-# 7. Build the Libraries
-echo "Building libtcc1.a using the proxy..."
-echo "Manually building libtcc1.a for aarch64 using cross-gcc..."
+# Quick sanity check – can the wrapper invoke tcc?
+echo "=== TCC version via QEMU ==="
+./tcc -v || echo "(tcc -v failed, continuing anyway)"
 
-cd lib
-rm -f *.o libtcc1.a
+# ---------------------------------------------------------------
+# 7. Build libtcc1.a runtime library
+#    CONFIG_BUILD_CROSS is now set by configure, so lib/Makefile
+#    will automatically use the cross-gcc (CC in config.mak) to
+#    compile libtcc1.a objects instead of trying to run the ARM tcc.
+# ---------------------------------------------------------------
+echo "=== Building libtcc1.a ==="
+make libtcc1.a
 
-# Compile generic + target-specific parts (adjust file list based on ls *.c *.S in lib/)
-aarch64-linux-gnu-gcc -c -O2 -Wall libtcc1.c -o libtcc1.o
-# If present (runtime helpers)
-[ -f alloca.c ] && aarch64-linux-gnu-gcc -c alloca.c -o alloca.o
-[ -f arm64.c ] && aarch64-linux-gnu-gcc -c arm64.c -o arm64.o     # or bt-arm64.c, etc.
-[ -f arm64-link.c ] && aarch64-linux-gnu-gcc -c arm64-link.c -o arm64-link.o
-
-# Add any other .c/.S files that exist for arm64 (check your lib/ dir)
-# Common ones: lib-arm64.c, bt-arm64.c, etc. — compile them similarly
-
-# Archive (include all .o you built)
-aarch64-linux-gnu-ar rcs ../libtcc1.a *.o
-cd ..
-
-# Make install will pick it up
+# ---------------------------------------------------------------
+# 8. Install
+# ---------------------------------------------------------------
+echo "=== Installing ==="
 make install
 
-
-# 9. Verification Test
-echo "Verifying with ARM64 Linking Test..."
+# ---------------------------------------------------------------
+# 9. Verification test
+# ---------------------------------------------------------------
+echo "=== Running ARM64 linking test ==="
 TEST_DIR="tcc_arm_test"
 rm -rf "$TEST_DIR"
 mkdir -p "$TEST_DIR"
 
-cat > "$TEST_DIR/test_lib.c" << 'EOF'
+cat > "$TEST_DIR/test_lib.c" <<'EOF'
 int add(int a, int b) { return a + b; }
 EOF
 
-cat > "$TEST_DIR/main.c" << 'EOF'
+cat > "$TEST_DIR/main.c" <<'EOF'
 #include <stdio.h>
 extern int add(int a, int b);
 int main() {
@@ -84,18 +111,25 @@ int main() {
 }
 EOF
 
-TCC_FINAL="./arm_build_output/bin/tcc"
+TCC_FINAL="$BUILD_OUTPUT/bin/tcc"
+
+# Build a shared library with the cross-gcc
 aarch64-linux-gnu-gcc -shared -fPIC -o "$TEST_DIR/libtest.so" "$TEST_DIR/test_lib.c"
 
+# Use the installed ARM64 TCC (via QEMU) to compile + link main.c
+echo "=== Compiling test with installed TCC ==="
 qemu-aarch64-static -L "$ARM_SYS_PATH" "$TCC_FINAL" \
     -I "$ARM_SYS_PATH/include" \
     -L "$TEST_DIR" \
     -ltest \
     "$TEST_DIR/main.c" \
-    -o "$TEST_DIR/arm_final_test"
+    -o "$TEST_DIR/arm_final_test" \
+    -v
 
+# Run the resulting ARM64 binary under QEMU
+echo "=== Running test binary ==="
 export LD_LIBRARY_PATH="$TEST_DIR:$ARM_SYS_PATH/lib"
 qemu-aarch64-static -L "$ARM_SYS_PATH" "$TEST_DIR/arm_final_test"
 
-echo "------------------------------------------------"
+echo "================================================"
 echo "Build and test completed successfully."

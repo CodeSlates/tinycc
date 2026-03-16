@@ -21,10 +21,19 @@ BFLAGS = -bt
 
 # in order to use gcc, type: make <target>-libtcc1-usegcc=yes
 arm-libtcc1-usegcc ?= no
+arm64-libtcc1-usegcc ?= no
 
 # This makes bounds checking 40%..60% faster.
 #x86_64-libtcc1-usegcc=yes
 #i386-libtcc1-usegcc=yes
+
+# Auto-enable usegcc when cross-building natively for a foreign arch
+# (CONFIG_BUILD_CROSS is set by configure when --cpu != host cpu)
+ifdef CONFIG_BUILD_CROSS
+ ifndef CROSS_TARGET
+  $(T)-libtcc1-usegcc = yes
+ endif
+endif
 
 ifeq "$($(T)-libtcc1-usegcc)" "yes"
  XCC = $(CC)
