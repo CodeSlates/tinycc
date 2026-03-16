@@ -494,6 +494,12 @@ else
   case $targetos in
     Linux)
       default triplet "${cpu}-linux-gnu"
+      # set default cross-build paths based on triplet
+      if test -n "$triplet"; then
+        default tcc_crtprefix "/usr/${triplet}/lib"
+        default tcc_libpaths "{B}:/usr/${triplet}/lib:/usr/lib/${triplet}"
+        default tcc_sysincludepaths "{B}/include:/usr/${triplet}/include:/usr/include"
+      fi
   esac
 fi
 
@@ -597,6 +603,10 @@ TARGETOS=$targetos
 BUILDOS=$buildos
 VERSION=$version
 EOF
+
+if test -n "$build_cross"; then
+  echo "CONFIG_BUILD_CROSS=yes" >> config.mak
+fi
 
 if test "$source_path_used" = "yes" ; then
     case $source_path in
