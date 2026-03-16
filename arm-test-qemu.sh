@@ -88,6 +88,16 @@ make libtcc1.a
 echo "=== Installing ==="
 make install
 
+# The install copied our build-dir wrapper script. We need to also
+# place the real ARM binary and fix up the installed wrapper.
+cp tcc_real.bin "$BUILD_OUTPUT/bin/tcc_real.bin"
+cat > "$BUILD_OUTPUT/bin/tcc" <<'WRAPPER'
+#!/bin/sh
+exec qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+    "$(dirname "$0")/tcc_real.bin" "$@"
+WRAPPER
+chmod +x "$BUILD_OUTPUT/bin/tcc"
+
 # ---------------------------------------------------------------
 # 9. Verification test
 # ---------------------------------------------------------------
@@ -116,9 +126,9 @@ TCC_FINAL="$BUILD_OUTPUT/bin/tcc"
 # Build a shared library with the cross-gcc
 aarch64-linux-gnu-gcc -shared -fPIC -o "$TEST_DIR/libtest.so" "$TEST_DIR/test_lib.c"
 
-# Use the installed ARM64 TCC (via QEMU) to compile + link main.c
+# Use the installed ARM64 TCC (wrapper handles QEMU internally)
 echo "=== Compiling test with installed TCC ==="
-qemu-aarch64-static -L "$ARM_SYS_PATH" "$TCC_FINAL" \
+"$TCC_FINAL" \
     -I "$ARM_SYS_PATH/include" \
     -L "$TEST_DIR" \
     -ltest \
